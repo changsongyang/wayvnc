@@ -361,6 +361,9 @@ static struct ext_screencopy_cursor_session_v1_listener cursor_listener = {
 static int ext_screencopy_start(struct screencopy* ptr, bool immediate)
 {
 	struct ext_screencopy* self = (struct ext_screencopy*)ptr;
+	if (self->frame) {
+		return -1;
+	}
 
 	if (!self->have_buffer_info) {
 		self->should_start = true;
@@ -372,9 +375,14 @@ static int ext_screencopy_start(struct screencopy* ptr, bool immediate)
 	return 0;
 }
 
-static void ext_screencopy_stop(struct screencopy* self)
+static void ext_screencopy_stop(struct screencopy* base)
 {
-	// Nothing to stop?
+	struct ext_screencopy* self = (struct ext_screencopy*)base;
+
+	if (self->frame) {
+		ext_screencopy_frame_v1_destroy(self->frame);
+		self->frame = NULL;
+	}
 }
 
 static struct screencopy* ext_screencopy_create(struct wl_output* output,
