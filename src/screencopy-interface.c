@@ -35,10 +35,12 @@ struct screencopy* screencopy_create(struct wl_output* output,
 	return NULL;
 }
 
-struct screencopy* screencopy_create_cursor(struct screencopy_impl* impl,
-		struct wl_output* output)
+struct screencopy* screencopy_create_cursor(struct wl_output* output,
+		struct wl_seat* seat)
 {
-	return impl->create_cursor ? impl->create_cursor(output) : NULL;
+	if (ext_screencopy_manager && ext_output_image_source_manager)
+		return ext_screencopy_impl.create_cursor(output, seat);
+	return NULL;
 }
 
 void screencopy_destroy(struct screencopy* self)

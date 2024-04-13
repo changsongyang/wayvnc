@@ -105,6 +105,7 @@ struct wayvnc {
 	struct seat* selected_seat;
 
 	struct screencopy* screencopy;
+	struct screencopy* cursor_sc;
 
 	struct aml_handler* wayland_handler;
 	struct aml_signal* signal_handler;
@@ -153,6 +154,8 @@ struct wayvnc_client {
 void wayvnc_exit(struct wayvnc* self);
 void on_capture_done(enum screencopy_result result, struct wv_buffer* buffer,
 		void* userdata);
+static void on_cursor_capture_done(enum screencopy_result result,
+		struct wv_buffer* buffer, void* userdata);
 static void on_nvnc_client_new(struct nvnc_client* client);
 void switch_to_output(struct wayvnc*, struct output*);
 void switch_to_next_output(struct wayvnc*);
@@ -166,6 +169,7 @@ static int blank_screen(struct wayvnc* self);
 static bool wayland_attach(struct wayvnc* self, const char* display,
 		const char* output);
 static void wayland_detach(struct wayvnc* self);
+static bool configure_cursor_sc(struct wayvnc* self);
 
 struct wl_shm* wl_shm = NULL;
 struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf = NULL;
@@ -457,6 +461,9 @@ static void wayland_detach(struct wayvnc* self)
 	zwp_linux_dmabuf = NULL;
 
 	if (screencopy_manager) {
+		screencopy_stop(self->cursor_sc);
+		screencopy_destroy(self->cursor_sc);
+		self->cursor_sc = NULL;
 		screencopy_stop(self->screencopy);
 		screencopy_destroy(self->screencopy);
 		self->screencopy = NULL;
@@ -1027,6 +1034,9 @@ int wayvnc_start_capture(struct wayvnc* self)
 		nvnc_log(NVNC_LOG_ERROR, "Failed to start capture. Exiting...");
 		wayvnc_exit(self);
 	}
+	if (!self->cursor_sc && configure_cursor_sc(self)) {
+		screencopy_start(self->cursor_sc, false);
+	}
 	return rc;
 }
 
@@ -1047,6 +1057,9 @@ int wayvnc_start_capture_immediate(struct wayvnc* self)
 	if (rc < 0) {
 		nvnc_log(NVNC_LOG_ERROR, "Failed to start capture. Exiting...");
 		wayvnc_exit(self);
+	}
+	if (configure_cursor_sc(self)) {
+		screencopy_start(self->cursor_sc, false);
 	}
 	return rc;
 }
@@ -1327,6 +1340,7 @@ static void client_destroy(void* obj)
 
 	if (wayvnc->nr_clients == 0 && wayvnc->display) {
 		nvnc_log(NVNC_LOG_INFO, "Stopping screen capture");
+		screencopy_stop(wayvnc->cursor_sc);
 		screencopy_stop(wayvnc->screencopy);
 		stop_performance_ticker(wayvnc);
 	}
@@ -1546,10 +1560,79 @@ void log_selected_output(struct wayvnc* self)
 	}
 }
 
+static void wayvnc_process_cursor(struct wayvnc* self, struct wv_buffer* buffer)
+{
+	nvnc_log(NVNC_LOG_DEBUG, "Got new cursor");
+	bool is_damaged = pixman_region_not_empty(&buffer->frame_damage);
+	nvnc_set_cursor(self->nvnc, buffer->nvnc_fb, buffer->width,
+			buffer->height, buffer->x_hotspot, buffer->y_hotspot,
+			is_damaged);
+}
+
+static void on_cursor_capture_done(enum screencopy_result result,
+		struct wv_buffer* buffer, void* userdata)
+{
+	struct wayvnc* self = userdata;
+
+	switch (result) {
+	case SCREENCOPY_FATAL:
+		nvnc_log(NVNC_LOG_ERROR, "Fatal error while capturing. Exiting...");
+		wayvnc_exit(self);
+		break;
+	case SCREENCOPY_FAILED:
+		nvnc_log(NVNC_LOG_WARNING, "Failed to capture cursor");
+		// TODO
+		break;
+	case SCREENCOPY_DONE:
+		wayvnc_process_cursor(self, buffer);
+		break;
+	}
+}
+
+static bool configure_cursor_sc(struct wayvnc* self)
+{
+	nvnc_log(NVNC_LOG_DEBUG, "Configuring cursor capturing");
+
+	screencopy_stop(self->cursor_sc);
+	screencopy_destroy(self->cursor_sc);
+
+	// TODO: Integrate this with client seat choices, etc...
+	struct seat* seat = self->selected_seat;
+	if (!seat)
+		seat = seat_first(&self->seats);
+
+	if (!(seat->capabilities & WL_SEAT_CAPABILITY_POINTER)) {
+		nvnc_log(NVNC_LOG_DEBUG, "Seat has no pointer capability");
+		return false;
+	}
+
+	if (!seat) {
+		nvnc_log(NVNC_LOG_DEBUG, "No seat available for cursor capture");
+		return false;
+	}
+
+	self->cursor_sc = screencopy_create_cursor(self->selected_output->wl_output,
+				seat->wl_seat);
+	if (!self->cursor_sc) {
+		nvnc_log(NVNC_LOG_DEBUG, "Failed to capture cursor");
+		return false;
+	}
+
+	self->cursor_sc->on_done = on_cursor_capture_done;
+	self->cursor_sc->userdata = self;
+
+	self->cursor_sc->rate_limit = self->max_rate;
+	self->cursor_sc->enable_linux_dmabuf = false;
+
+	nvnc_log(NVNC_LOG_DEBUG, "Configured cursor capturing");
+	return true;
+}
+
 bool configure_screencopy(struct wayvnc* self)
 {
 	screencopy_stop(self->screencopy);
 	screencopy_destroy(self->screencopy);
+
 	self->screencopy = screencopy_create(self->selected_output->wl_output,
 			self->overlay_cursor);
 	if (!self->screencopy) {
@@ -1591,6 +1674,8 @@ void switch_to_output(struct wayvnc* self, struct output* output)
 	screencopy_stop(self->screencopy);
 	set_selected_output(self, output);
 	configure_screencopy(self);
+	if (self->cursor_sc)
+		configure_cursor_sc(self);
 	reinitialise_pointers(self);
 	if (self->nr_clients > 0)
 		wayvnc_start_capture_immediate(self);
@@ -1688,6 +1773,8 @@ static bool wayland_attach(struct wayvnc* self, const char* display,
 	}
 	set_selected_output(self, out);
 	configure_screencopy(self);
+	if (self->cursor_sc)
+		configure_cursor_sc(self);
 
 	struct nvnc_client* nvnc_client;
 	for (nvnc_client = nvnc_client_first(self->nvnc); nvnc_client;

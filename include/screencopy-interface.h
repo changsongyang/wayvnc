@@ -22,6 +22,7 @@
 
 struct zext_screencopy_manager_v1;
 struct wl_output;
+struct wl_seat;
 struct wv_buffer;
 
 enum screencopy_result {
@@ -35,7 +36,7 @@ typedef void (*screencopy_done_fn)(enum screencopy_result,
 
 struct screencopy_impl {
 	struct screencopy* (*create)(struct wl_output*, bool render_cursor);
-	struct screencopy* (*create_cursor)(struct wl_output*);
+	struct screencopy* (*create_cursor)(struct wl_output*, struct wl_seat*);
 	void (*destroy)(struct screencopy*);
 	int (*start)(struct screencopy*, bool immediate);
 	void (*stop)(struct screencopy*);
@@ -57,8 +58,8 @@ struct screencopy {
 
 struct screencopy* screencopy_create(struct wl_output* output,
 		bool render_cursor);
-struct screencopy* screencopy_create_cursor(struct screencopy_impl* impl,
-		struct wl_output* output);
+struct screencopy* screencopy_create_cursor(struct wl_output* output,
+		struct wl_seat* seat);
 void screencopy_destroy(struct screencopy* self);
 
 int screencopy_start(struct screencopy* self, bool immediate);

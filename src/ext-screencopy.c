@@ -42,6 +42,7 @@ extern struct ext_screencopy_manager_v1* ext_screencopy_manager;
 struct ext_screencopy {
 	struct screencopy parent;
 	struct wl_output* wl_output;
+	struct wl_seat* wl_seat;
 	struct ext_screencopy_session_v1* session;
 	struct ext_screencopy_frame_v1* frame;
 	struct ext_screencopy_cursor_session_v1* cursor;
@@ -51,7 +52,6 @@ struct ext_screencopy {
 	bool have_buffer_info;
 	bool should_start;
 	bool shall_be_immediate;
-	bool capture_cursor;
 
 	uint32_t width, height;
 	uint32_t wl_shm_stride, wl_shm_format;
@@ -67,7 +67,7 @@ static struct ext_screencopy_session_v1_listener session_listener;
 static struct ext_screencopy_frame_v1_listener frame_listener;
 //static struct ext_screencopy_cursor_session_v1_listener cursor_listener;
 
-static int ext_screencopy_init_session(struct ext_screencopy* self)
+static void ext_screencopy_deinit_session(struct ext_screencopy* self)
 {
 	if (self->frame)
 		ext_screencopy_frame_v1_destroy(self->frame);
@@ -77,6 +77,13 @@ static int ext_screencopy_init_session(struct ext_screencopy* self)
 		ext_screencopy_session_v1_destroy(self->session);
 	self->session = NULL;
 
+	if (self->cursor)
+		ext_screencopy_cursor_session_v1_destroy(self->cursor);
+	self->cursor = NULL;
+}
+
+static int ext_screencopy_init_session(struct ext_screencopy* self)
+{
 	struct ext_image_source_v1* source;
 	source = ext_output_image_source_manager_v1_create_source(
 			ext_output_image_source_manager, self->wl_output);
@@ -95,11 +102,6 @@ static int ext_screencopy_init_session(struct ext_screencopy* self)
 
 	ext_screencopy_session_v1_add_listener(self->session,
 			&session_listener, self);
-
-	if (self->capture_cursor) {
-		// TODO: create_pointer_cursor_session
-	}
-
 	return 0;
 }
 
@@ -112,7 +114,7 @@ static void ext_screencopy_schedule_capture(struct ext_screencopy* self,
 	// TODO: Restart session on immediate capture
 
 	self->buffer = wv_buffer_pool_acquire(self->pool);
-	self->buffer->domain = self->capture_cursor ? WV_BUFFER_DOMAIN_CURSOR :
+	self->buffer->domain = self->cursor ? WV_BUFFER_DOMAIN_CURSOR :
 		WV_BUFFER_DOMAIN_OUTPUT;
 
 	self->frame = ext_screencopy_session_v1_create_frame(self->session);
@@ -228,6 +230,7 @@ static void session_handle_constraints_done(void *data,
 static void session_handle_stopped(void* data,
 		struct ext_screencopy_session_v1* session)
 {
+	nvnc_log(NVNC_LOG_DEBUG, "Session %p stopped", session);
 	// TODO
 }
 
@@ -258,7 +261,7 @@ static void frame_handle_ready(void *data,
 
 	assert(self->buffer);
 
-	enum wv_buffer_domain domain = self->capture_cursor ?
+	enum wv_buffer_domain domain = self->cursor ?
 		WV_BUFFER_DOMAIN_CURSOR : WV_BUFFER_DOMAIN_OUTPUT;
 	wv_buffer_registry_damage_all(&self->buffer->frame_damage, domain);
 	pixman_region_clear(&self->buffer->buffer_damage);
@@ -287,6 +290,7 @@ static void frame_handle_failed(void *data,
 	self->buffer = NULL;
 
 	if (reason == EXT_SCREENCOPY_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
+		ext_screencopy_deinit_session(self);
 		ext_screencopy_init_session(self);
 	}
 
@@ -421,7 +425,8 @@ failure:
 	return NULL;
 }
 
-static struct screencopy* ext_screencopy_create_cursor(struct wl_output* output)
+static struct screencopy* ext_screencopy_create_cursor(struct wl_output* output,
+		struct wl_seat* seat)
 {
 	struct ext_screencopy* self = calloc(1, sizeof(*self));
 	if (!self)
@@ -431,18 +436,38 @@ static struct screencopy* ext_screencopy_create_cursor(struct wl_output* output)
 	self->parent.rate_limit = 30;
 
 	self->wl_output = output;
-	self->capture_cursor = true;
+	self->wl_seat = seat;
 
 	self->pool = wv_buffer_pool_create(0, 0, 0, 0, 0);
 	if (!self->pool)
 		goto failure;
 
-	if (ext_screencopy_init_session(self) < 0)
-		goto session_failure;
+	struct ext_image_source_v1* source;
+	source = ext_output_image_source_manager_v1_create_source(
+			ext_output_image_source_manager, self->wl_output);
+	if (!source)
+		goto image_source_failure;
+
+	// TODO: Can the pointer object in a seat change?
+	struct wl_pointer* pointer = wl_seat_get_pointer(seat);
+	uint32_t options = 0;
+	self->cursor = ext_screencopy_manager_v1_create_pointer_cursor_session(
+			ext_screencopy_manager, source, pointer, options);
+	ext_image_source_v1_destroy(source);
+	if (!self->cursor)
+		goto cursor_failure;
+
+	self->session = ext_screencopy_cursor_session_v1_get_screencopy_session(
+			self->cursor);
+	assert(self->session);
+
+	ext_screencopy_session_v1_add_listener(self->session,
+			&session_listener, self);
 
 	return (struct screencopy*)self;
 
-session_failure:
+cursor_failure:
+image_source_failure:
 	wv_buffer_pool_destroy(self->pool);
 failure:
 	free(self);
