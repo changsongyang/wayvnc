@@ -1112,7 +1112,7 @@ void wayvnc_process_frame(struct wayvnc* self, struct wv_buffer* buffer)
 {
 	// TODO: Back buffer used to be set to NULL here, what's that about?
 
-	nvnc_log(NVNC_LOG_DEBUG, "Passing on buffer: %p", buffer);
+	nvnc_trace("Passing on buffer: %p", buffer);
 
 	self->n_frames_captured++;
 	self->damage_area_sum +=

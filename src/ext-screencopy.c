@@ -139,8 +139,12 @@ static void ext_screencopy_schedule_capture(struct ext_screencopy* self,
 
 	ext_screencopy_frame_v1_capture(self->frame);
 
-	nvnc_log(NVNC_LOG_DEBUG, "Committed buffer%s: %p\n", immediate ? " immediately" : "",
-			self->buffer);
+	float damage_area = calculate_region_area(&self->buffer->buffer_damage);
+	float pixel_area = self->buffer->width * self->buffer->height;
+
+	nvnc_trace("Committed buffer%s: %p with %.02f %% damage",
+			immediate ? " immediately" : "", self->buffer,
+			100.0 * damage_area / pixel_area);
 }
 
 static void session_handle_format_shm(void *data,
@@ -218,7 +222,7 @@ static void session_handle_constraints_done(void *data,
 
 	self->have_buffer_info = true;
 
-	nvnc_log(NVNC_LOG_DEBUG, "Init done\n");
+	nvnc_log(NVNC_LOG_DEBUG, "Init done");
 }
 
 static void session_handle_stopped(void* data,
@@ -247,7 +251,10 @@ static void frame_handle_ready(void *data,
 	ext_screencopy_frame_v1_destroy(self->frame);
 	self->frame = NULL;
 
-	nvnc_log(NVNC_LOG_DEBUG, "Ready!\n");
+	float damage_area = calculate_region_area(&self->buffer->frame_damage);
+	float pixel_area = self->buffer->width * self->buffer->height;
+	nvnc_trace("Frame ready with damage: %.02f %", 100.0 * damage_area /
+			pixel_area);
 
 	assert(self->buffer);
 
