@@ -54,5 +54,6 @@ int screencopy_start(struct screencopy* self, bool immediate)
 
 void screencopy_stop(struct screencopy* self)
 {
-	self->impl->stop(self);
+	if (self)
+		self->impl->stop(self);
 }
