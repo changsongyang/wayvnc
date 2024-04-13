@@ -458,6 +458,7 @@ static void wayland_detach(struct wayvnc* self)
 	if (screencopy_manager) {
 		screencopy_stop(self->screencopy);
 		screencopy_destroy(self->screencopy);
+		self->screencopy = NULL;
 		zwlr_screencopy_manager_v1_destroy(screencopy_manager);
 	}
 	screencopy_manager = NULL;
@@ -1563,6 +1564,7 @@ void log_selected_output(struct wayvnc* self)
 
 bool configure_screencopy(struct wayvnc* self)
 {
+	screencopy_stop(self->screencopy);
 	screencopy_destroy(self->screencopy);
 	self->screencopy = screencopy_create(self->selected_output->wl_output,
 			self->overlay_cursor);
