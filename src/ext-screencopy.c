@@ -69,6 +69,7 @@ static struct ext_screencopy_frame_v1_listener frame_listener;
 
 static void ext_screencopy_deinit_session(struct ext_screencopy* self)
 {
+	nvnc_log(NVNC_LOG_DEBUG, "DEINIT %p", self);
 	if (self->frame)
 		ext_screencopy_frame_v1_destroy(self->frame);
 	self->frame = NULL;
@@ -102,6 +103,33 @@ static int ext_screencopy_init_session(struct ext_screencopy* self)
 
 	ext_screencopy_session_v1_add_listener(self->session,
 			&session_listener, self);
+	return 0;
+}
+
+static int ext_screencopy_init_cursor_session(struct ext_screencopy* self)
+{
+	struct ext_image_source_v1* source;
+	source = ext_output_image_source_manager_v1_create_source(
+			ext_output_image_source_manager, self->wl_output);
+	if (!source)
+		return -1;
+
+	// TODO: Can the pointer object in a seat change?
+	struct wl_pointer* pointer = wl_seat_get_pointer(self->wl_seat);
+	uint32_t options = 0;
+	self->cursor = ext_screencopy_manager_v1_create_pointer_cursor_session(
+			ext_screencopy_manager, source, pointer, options);
+	ext_image_source_v1_destroy(source);
+	if (!self->cursor)
+		return -1;
+
+	self->session = ext_screencopy_cursor_session_v1_get_screencopy_session(
+			self->cursor);
+	assert(self->session);
+
+	ext_screencopy_session_v1_add_listener(self->session,
+			&session_listener, self);
+
 	return 0;
 }
 
@@ -156,7 +184,9 @@ static void session_handle_format_shm(void *data,
 	struct ext_screencopy* self = data;
 
 	self->have_wl_shm = true;
-	self->wl_shm_format = format;
+	self->wl_shm_format = fourcc_from_wl_shm(format);
+
+	nvnc_log(NVNC_LOG_DEBUG, "shm format: %"PRIx32, format);
 }
 
 static void session_handle_format_drm(void *data,
@@ -164,6 +194,8 @@ static void session_handle_format_drm(void *data,
 		uint32_t format, struct wl_array* modifiers)
 {
 	struct ext_screencopy* self = data;
+
+	nvnc_log(NVNC_LOG_DEBUG, "DMA-BUF format: %"PRIx32, format);
 
 #ifdef ENABLE_SCREENCOPY_DMABUF
 	self->have_linux_dmabuf = true;
@@ -184,6 +216,9 @@ static void session_handle_dimensions(void *data,
 		uint32_t height)
 {
 	struct ext_screencopy* self = data;
+
+	nvnc_log(NVNC_LOG_DEBUG, "Buffer dimensions: %"PRIu32"x%"PRIu32,
+			width, height);
 
 	self->width = width;
 	self->height = height;
@@ -207,10 +242,13 @@ static void session_handle_constraints_done(void *data,
 		type = WV_BUFFER_DMABUF;
 	} else
 #endif
-	{
+	if (self->have_wl_shm) {
 		format = self->wl_shm_format;
 		stride = self->wl_shm_stride;
 		type = WV_BUFFER_SHM;
+	} else {
+		nvnc_log(NVNC_LOG_DEBUG, "No buffer formats supplied");
+		return;
 	}
 
 	wv_buffer_pool_resize(self->pool, type, width, height, stride, format);
@@ -230,8 +268,17 @@ static void session_handle_constraints_done(void *data,
 static void session_handle_stopped(void* data,
 		struct ext_screencopy_session_v1* session)
 {
+	struct ext_screencopy* self = data;
 	nvnc_log(NVNC_LOG_DEBUG, "Session %p stopped", session);
-	// TODO
+	return;
+
+	if (self->cursor) {
+		ext_screencopy_deinit_session(self);
+		ext_screencopy_init_cursor_session(self);
+	} else {
+		ext_screencopy_deinit_session(self);
+		ext_screencopy_init_session(self);
+	}
 }
 
 static void frame_handle_transform(void *data,
@@ -290,8 +337,13 @@ static void frame_handle_failed(void *data,
 	self->buffer = NULL;
 
 	if (reason == EXT_SCREENCOPY_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
-		ext_screencopy_deinit_session(self);
-		ext_screencopy_init_session(self);
+		if (self->cursor) {
+			ext_screencopy_deinit_session(self);
+			ext_screencopy_init_cursor_session(self);
+		} else {
+			ext_screencopy_deinit_session(self);
+			ext_screencopy_init_session(self);
+		}
 	}
 
 	self->parent.on_done(SCREENCOPY_FAILED, NULL, self->parent.userdata);
@@ -442,32 +494,12 @@ static struct screencopy* ext_screencopy_create_cursor(struct wl_output* output,
 	if (!self->pool)
 		goto failure;
 
-	struct ext_image_source_v1* source;
-	source = ext_output_image_source_manager_v1_create_source(
-			ext_output_image_source_manager, self->wl_output);
-	if (!source)
-		goto image_source_failure;
-
-	// TODO: Can the pointer object in a seat change?
-	struct wl_pointer* pointer = wl_seat_get_pointer(seat);
-	uint32_t options = 0;
-	self->cursor = ext_screencopy_manager_v1_create_pointer_cursor_session(
-			ext_screencopy_manager, source, pointer, options);
-	ext_image_source_v1_destroy(source);
-	if (!self->cursor)
-		goto cursor_failure;
-
-	self->session = ext_screencopy_cursor_session_v1_get_screencopy_session(
-			self->cursor);
-	assert(self->session);
-
-	ext_screencopy_session_v1_add_listener(self->session,
-			&session_listener, self);
+	if (ext_screencopy_init_cursor_session(self) < 0)
+		goto session_failure;
 
 	return (struct screencopy*)self;
 
-cursor_failure:
-image_source_failure:
+session_failure:
 	wv_buffer_pool_destroy(self->pool);
 failure:
 	free(self);
