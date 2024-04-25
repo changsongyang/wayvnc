@@ -59,13 +59,15 @@ struct ext_screencopy {
 	bool have_wl_shm;
 	bool have_linux_dmabuf;
 	uint32_t dmabuf_format;
+
+	struct { int x, y; } hotspot;
 };
 
 struct screencopy_impl ext_screencopy_impl;
 
 static struct ext_screencopy_session_v1_listener session_listener;
 static struct ext_screencopy_frame_v1_listener frame_listener;
-//static struct ext_screencopy_cursor_session_v1_listener cursor_listener;
+static struct ext_screencopy_cursor_session_v1_listener cursor_listener;
 
 static void ext_screencopy_deinit_session(struct ext_screencopy* self)
 {
@@ -122,6 +124,9 @@ static int ext_screencopy_init_cursor_session(struct ext_screencopy* self)
 	ext_image_source_v1_destroy(source);
 	if (!self->cursor)
 		return -1;
+
+	ext_screencopy_cursor_session_v1_add_listener(self->cursor,
+			&cursor_listener, self);
 
 	self->session = ext_screencopy_cursor_session_v1_get_screencopy_session(
 			self->cursor);
@@ -316,6 +321,9 @@ static void frame_handle_ready(void *data,
 	struct wv_buffer* buffer = self->buffer;
 	self->buffer = NULL;
 
+	buffer->x_hotspot = self->hotspot.x;
+	buffer->y_hotspot = self->hotspot.y;
+
 	self->parent.on_done(SCREENCOPY_DONE, buffer, self->parent.userdata);
 }
 
@@ -355,6 +363,7 @@ static void frame_handle_damage(void *data,
 {
 	struct ext_screencopy* self = data;
 
+	nvnc_trace("Got frame damage: %dx%d", width, height);
 	wv_buffer_damage_rect(self->buffer, x, y, width, height);
 }
 
@@ -408,18 +417,21 @@ static void cursor_handle_hotspot(void* data,
 		struct ext_screencopy_cursor_session_v1* cursor, int x, int y)
 {
 	struct ext_screencopy* self = data;
+	self->hotspot.x = x;
+	self->hotspot.y = y;
+
 	if (self->parent.cursor_hotspot)
 		self->parent.cursor_hotspot(x, y, self->parent.userdata);
+
+	nvnc_trace("Got hotspot at %d, %d", x, y);
 }
 
-/*
 static struct ext_screencopy_cursor_session_v1_listener cursor_listener = {
 	.enter = cursor_handle_enter,
 	.leave = cursor_handle_leave,
 	.position = cursor_handle_position,
 	.hotspot = cursor_handle_hotspot,
 };
-*/
 
 static int ext_screencopy_start(struct screencopy* ptr, bool immediate)
 {
