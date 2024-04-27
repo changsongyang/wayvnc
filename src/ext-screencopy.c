@@ -61,6 +61,9 @@ struct ext_screencopy {
 	uint32_t dmabuf_format;
 
 	struct { int x, y; } hotspot;
+
+	uint64_t last_time;
+	struct aml_timer* timer;
 };
 
 struct screencopy_impl ext_screencopy_impl;
@@ -137,7 +140,6 @@ static int ext_screencopy_init_cursor_session(struct ext_screencopy* self)
 	return 0;
 }
 
-// TODO: Throttle capturing to max_fps
 static void ext_screencopy_schedule_capture(struct ext_screencopy* self)
 {
 	assert(!self->frame);
@@ -173,8 +175,17 @@ static void ext_screencopy_schedule_capture(struct ext_screencopy* self)
 	float damage_area = calculate_region_area(&self->buffer->buffer_damage);
 	float pixel_area = self->buffer->width * self->buffer->height;
 
-	nvnc_trace("Committed buffer: %p with %.02f %% damage", self->buffer,
+	nvnc_trace("Committed %sbuffer: %p with %.02f %% damage",
+			self->cursor ? "cursor " : "", self->buffer,
 			100.0 * damage_area / pixel_area);
+}
+
+static void ext_screencopy_schedule_from_timer(void* obj)
+{
+	struct ext_screencopy* self = aml_get_userdata(obj);
+	assert(self);
+
+	ext_screencopy_schedule_capture(self);
 }
 
 static void session_handle_format_shm(void *data,
@@ -320,6 +331,9 @@ static void frame_handle_ready(void *data,
 
 	self->frame_count++;
 
+	// TODO: Use presentation time somehow?
+	self->last_time = gettime_us();
+
 	self->parent.on_done(SCREENCOPY_DONE, buffer, self->parent.userdata);
 }
 
@@ -440,8 +454,22 @@ static int ext_screencopy_start(struct screencopy* ptr, bool immediate)
 
 	if (!self->have_buffer_info) {
 		self->should_start = true;
-	} else {
+		return 0;
+	}
+
+	uint64_t eps = 4000; // µs
+	uint64_t period = round(1e6 / self->parent.rate_limit);
+	uint64_t next_time = self->last_time + period - eps;
+	uint64_t now = gettime_us();
+
+	if (now >= next_time) {
+		aml_stop(aml_get_default(), self->timer);
 		ext_screencopy_schedule_capture(self);
+	} else {
+		nvnc_trace("Scheduling %scapture after %"PRIu64" µs",
+				self->cursor ? "cursor " : "", next_time - now);
+		aml_set_duration(self->timer, next_time - now);
+		aml_start(aml_get_default(), self->timer);
 	}
 
 	return 0;
@@ -450,6 +478,8 @@ static int ext_screencopy_start(struct screencopy* ptr, bool immediate)
 static void ext_screencopy_stop(struct screencopy* base)
 {
 	struct ext_screencopy* self = (struct ext_screencopy*)base;
+
+	aml_stop(aml_get_default(), self->timer);
 
 	if (self->frame) {
 		ext_screencopy_frame_v1_destroy(self->frame);
@@ -469,6 +499,10 @@ static struct screencopy* ext_screencopy_create(struct wl_output* output,
 
 	self->wl_output = output;
 	self->render_cursors = render_cursor;
+
+	self->timer = aml_timer_new(0, ext_screencopy_schedule_from_timer, self,
+			NULL);
+	assert(self->timer);
 
 	self->pool = wv_buffer_pool_create(0, 0, 0, 0, 0);
 	if (!self->pool)
@@ -499,6 +533,10 @@ static struct screencopy* ext_screencopy_create_cursor(struct wl_output* output,
 	self->wl_output = output;
 	self->wl_seat = seat;
 
+	self->timer = aml_timer_new(0, ext_screencopy_schedule_from_timer, self,
+			NULL);
+	assert(self->timer);
+
 	self->pool = wv_buffer_pool_create(0, 0, 0, 0, 0);
 	if (!self->pool)
 		goto failure;
@@ -518,6 +556,9 @@ failure:
 void ext_screencopy_destroy(struct screencopy* ptr)
 {
 	struct ext_screencopy* self = (struct ext_screencopy*)ptr;
+
+	aml_stop(aml_get_default(), self->timer);
+	aml_unref(self->timer);
 
 	if (self->frame)
 		ext_screencopy_frame_v1_destroy(self->frame);
