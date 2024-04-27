@@ -51,7 +51,7 @@ struct ext_screencopy {
 	struct wv_buffer* buffer;
 	bool have_buffer_info;
 	bool should_start;
-	bool shall_be_immediate;
+	uint32_t frame_count;
 
 	uint32_t width, height;
 	uint32_t wl_shm_stride, wl_shm_format;
@@ -116,7 +116,6 @@ static int ext_screencopy_init_cursor_session(struct ext_screencopy* self)
 	if (!source)
 		return -1;
 
-	// TODO: Can the pointer object in a seat change?
 	struct wl_pointer* pointer = wl_seat_get_pointer(self->wl_seat);
 	uint32_t options = 0;
 	self->cursor = ext_screencopy_manager_v1_create_pointer_cursor_session(
@@ -139,12 +138,9 @@ static int ext_screencopy_init_cursor_session(struct ext_screencopy* self)
 }
 
 // TODO: Throttle capturing to max_fps
-static void ext_screencopy_schedule_capture(struct ext_screencopy* self,
-		bool immediate)
+static void ext_screencopy_schedule_capture(struct ext_screencopy* self)
 {
 	assert(!self->frame);
-
-	// TODO: Restart session on immediate capture
 
 	self->buffer = wv_buffer_pool_acquire(self->pool);
 	self->buffer->domain = self->cursor ? WV_BUFFER_DOMAIN_CURSOR :
@@ -177,8 +173,7 @@ static void ext_screencopy_schedule_capture(struct ext_screencopy* self,
 	float damage_area = calculate_region_area(&self->buffer->buffer_damage);
 	float pixel_area = self->buffer->width * self->buffer->height;
 
-	nvnc_trace("Committed buffer%s: %p with %.02f %% damage",
-			immediate ? " immediately" : "", self->buffer,
+	nvnc_trace("Committed buffer: %p with %.02f %% damage", self->buffer,
 			100.0 * damage_area / pixel_area);
 }
 
@@ -259,10 +254,8 @@ static void session_handle_constraints_done(void *data,
 	wv_buffer_pool_resize(self->pool, type, width, height, stride, format);
 
 	if (self->should_start) {
-		ext_screencopy_schedule_capture(self, self->shall_be_immediate);
-
+		ext_screencopy_schedule_capture(self);
 		self->should_start = false;
-		self->shall_be_immediate = false;
 	}
 
 	self->have_buffer_info = true;
@@ -270,20 +263,21 @@ static void session_handle_constraints_done(void *data,
 	nvnc_log(NVNC_LOG_DEBUG, "Init done");
 }
 
+static void restart_session(struct ext_screencopy* self)
+{
+	bool is_cursor_session = self->cursor;
+	ext_screencopy_deinit_session(self);
+	if (is_cursor_session)
+		ext_screencopy_init_cursor_session(self);
+	else
+		ext_screencopy_init_session(self);
+}
+
 static void session_handle_stopped(void* data,
 		struct ext_screencopy_session_v1* session)
 {
-	struct ext_screencopy* self = data;
 	nvnc_log(NVNC_LOG_DEBUG, "Session %p stopped", session);
-	return;
-
-	if (self->cursor) {
-		ext_screencopy_deinit_session(self);
-		ext_screencopy_init_cursor_session(self);
-	} else {
-		ext_screencopy_deinit_session(self);
-		ext_screencopy_init_session(self);
-	}
+	// TODO: Restart session if it is stopped?
 }
 
 static void frame_handle_transform(void *data,
@@ -324,6 +318,8 @@ static void frame_handle_ready(void *data,
 	buffer->x_hotspot = self->hotspot.x;
 	buffer->y_hotspot = self->hotspot.y;
 
+	self->frame_count++;
+
 	self->parent.on_done(SCREENCOPY_DONE, buffer, self->parent.userdata);
 }
 
@@ -345,16 +341,11 @@ static void frame_handle_failed(void *data,
 	self->buffer = NULL;
 
 	if (reason == EXT_SCREENCOPY_FRAME_V1_FAILURE_REASON_BUFFER_CONSTRAINTS) {
-		if (self->cursor) {
-			ext_screencopy_deinit_session(self);
-			ext_screencopy_init_cursor_session(self);
-		} else {
-			ext_screencopy_deinit_session(self);
-			ext_screencopy_init_session(self);
-		}
+		screencopy_start(&self->parent, false);
+		return;
 	}
 
-	self->parent.on_done(SCREENCOPY_FAILED, NULL, self->parent.userdata);
+	self->parent.on_done(SCREENCOPY_FATAL, NULL, self->parent.userdata);
 }
 
 static void frame_handle_damage(void *data,
@@ -440,11 +431,17 @@ static int ext_screencopy_start(struct screencopy* ptr, bool immediate)
 		return -1;
 	}
 
+	if (immediate && self->frame_count != 0) {
+		// Flush state:
+		restart_session(self);
+		self->should_start = true;
+		return 0;
+	}
+
 	if (!self->have_buffer_info) {
 		self->should_start = true;
-		self->shall_be_immediate = immediate;
 	} else {
-		ext_screencopy_schedule_capture(self, immediate);
+		ext_screencopy_schedule_capture(self);
 	}
 
 	return 0;
