@@ -524,10 +524,13 @@ void ext_screencopy_destroy(struct screencopy* ptr)
 
 	if (self->frame)
 		ext_screencopy_frame_v1_destroy(self->frame);
+	if (self->cursor)
+		ext_screencopy_cursor_session_v1_destroy(self->cursor);
 	if (self->session)
 		ext_screencopy_session_v1_destroy(self->session);
 	if (self->buffer)
 		wv_buffer_pool_release(self->pool, self->buffer);
+	wv_buffer_pool_destroy(self->pool);
 	free(self);
 }
 
