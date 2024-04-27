@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2019 - 2023 Andri Yngvason
+ * Copyright (c) 2019 - 2024 Andri Yngvason
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -965,7 +965,7 @@ static int init_nvnc(struct wayvnc* self, const char* addr, uint16_t port,
 
 	nvnc_set_name(self->nvnc, "WayVNC");
 
-	//nvnc_set_desktop_layout_fn(self->nvnc, on_client_resize);
+	nvnc_set_desktop_layout_fn(self->nvnc, on_client_resize);
 
 	enum nvnc_auth_flags auth_flags = 0;
 	if (self->cfg.enable_auth) {
@@ -1026,8 +1026,24 @@ failure:
 	return -1;
 }
 
+static void wayvnc_stop_cursor_capture(struct wayvnc* self)
+{
+	struct nvnc_client* nvnc_client;
+	for (nvnc_client = nvnc_client_first(self->nvnc); nvnc_client;
+			nvnc_client = nvnc_client_next(nvnc_client)) {
+		struct wayvnc_client* client = nvnc_get_userdata(nvnc_client);
+		assert(client);
+		screencopy_stop(client->cursor_sc);
+	}
+}
+
 static void wayvnc_start_cursor_capture(struct wayvnc* self, bool immediate)
 {
+	// This doesn't really work well with more than one client
+	if (self->nr_clients != 1) {
+		return;
+	}
+
 	struct nvnc_client* nvnc_client;
 	for (nvnc_client = nvnc_client_first(self->nvnc); nvnc_client;
 			nvnc_client = nvnc_client_next(nvnc_client)) {
@@ -1117,9 +1133,11 @@ static void on_output_power_change(struct output* output)
 	case OUTPUT_POWER_ON:
 		nvnc_log(NVNC_LOG_WARNING, "Output is now on. Restarting frame capture");
 		wayvnc_start_capture_immediate(self);
+		wayvnc_start_cursor_capture(self, true);
 		break;
 	case OUTPUT_POWER_OFF:
 		nvnc_log(NVNC_LOG_WARNING, "Output is now off. Pausing frame capture");
+		wayvnc_stop_cursor_capture(self);
 		screencopy_stop(self->screencopy);
 		blank_screen(self);
 		break;
@@ -1352,6 +1370,7 @@ static void client_destroy(void* obj)
 	}
 
 	screencopy_stop(self->cursor_sc);
+	screencopy_destroy(self->cursor_sc);
 
 	if (self->keyboard.virtual_keyboard) {
 		zwp_virtual_keyboard_v1_destroy(
@@ -1385,10 +1404,9 @@ static void on_nvnc_client_new(struct nvnc_client* client)
 	assert(wayvnc_client);
 	nvnc_set_userdata(client, wayvnc_client, client_destroy);
 
-	if (self->nr_clients == 0 && self->display) {
+	if (self->nr_clients++ == 0 && self->display) {
 		handle_first_client(self);
 	}
-	self->nr_clients++;
 	nvnc_log(NVNC_LOG_DEBUG, "Client connected, new client count: %d",
 			self->nr_clients);
 
@@ -1439,8 +1457,8 @@ static void client_init_pointer(struct wayvnc_client* self)
 
 	// Get seat capability update
 	// TODO: Make this asynchronous
-	wl_display_dispatch(wayvnc->display);
 	wl_display_roundtrip(wayvnc->display);
+	wl_display_dispatch_pending(wayvnc->display);
 
 	configure_cursor_sc(wayvnc, self);
 }
@@ -1597,9 +1615,7 @@ static void on_cursor_capture_done(enum screencopy_result result,
 		wayvnc_exit(self);
 		break;
 	case SCREENCOPY_FAILED:
-		nvnc_log(NVNC_LOG_WARNING, "Failed to capture cursor");
 		wayvnc_start_cursor_capture(self, true);
-		// TODO
 		break;
 	case SCREENCOPY_DONE:
 		wayvnc_process_cursor(self, buffer);
@@ -1689,7 +1705,8 @@ void switch_to_output(struct wayvnc* self, struct output* output)
 	reinitialise_pointers(self);
 	if (self->nr_clients > 0)
 		wayvnc_start_capture_immediate(self);
-	// TODO: Reset cursor capturing
+	wayvnc_stop_cursor_capture(self);
+	wayvnc_start_cursor_capture(self, true);
 }
 
 void switch_to_next_output(struct wayvnc* self)
