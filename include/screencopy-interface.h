@@ -1,5 +1,5 @@
 /*
- * Copyright (c) 2022 Andri Yngvason
+ * Copyright (c) 2022 - 2024 Andri Yngvason
  *
  * Permission to use, copy, modify, and/or distribute this software for any
  * purpose with or without fee is hereby granted, provided that the above
@@ -18,8 +18,6 @@
 
 #include <stdbool.h>
 
-// TODO: Add a way to set the rate limit
-
 struct zext_screencopy_manager_v1;
 struct wl_output;
 struct wl_seat;
@@ -31,10 +29,16 @@ enum screencopy_result {
 	SCREENCOPY_FAILED,
 };
 
+enum screencopy_capabilitites {
+	SCREENCOPY_CAP_CURSOR = 1 << 0,
+	SCREENCOPY_CAP_TRANSFORM = 1 << 1,
+};
+
 typedef void (*screencopy_done_fn)(enum screencopy_result,
 		struct wv_buffer* buffer, void* userdata);
 
 struct screencopy_impl {
+	enum screencopy_capabilitites caps;
 	struct screencopy* (*create)(struct wl_output*, bool render_cursor);
 	struct screencopy* (*create_cursor)(struct wl_output*, struct wl_seat*);
 	void (*destroy)(struct screencopy*);

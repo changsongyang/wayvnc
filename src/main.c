@@ -1127,10 +1127,30 @@ static void on_output_power_change(struct output* output)
 	}
 }
 
+static void apply_output_transform(const struct wayvnc* self,
+		struct wv_buffer* buffer, struct pixman_region16* damage)
+{
+	enum wl_output_transform output_transform, buffer_transform;
+	output_transform = self->selected_output->transform;
+
+	if (buffer->y_inverted) {
+		buffer_transform = wv_output_transform_compose(output_transform,
+				WL_OUTPUT_TRANSFORM_FLIPPED_180);
+
+		wv_region_transform(damage, &buffer->frame_damage,
+				WL_OUTPUT_TRANSFORM_FLIPPED_180,
+				buffer->width, buffer->height);
+	} else {
+		buffer_transform = output_transform;
+		pixman_region_copy(damage, &buffer->frame_damage);
+	}
+
+	nvnc_fb_set_transform(buffer->nvnc_fb,
+			(enum nvnc_transform)buffer_transform);
+}
+
 void wayvnc_process_frame(struct wayvnc* self, struct wv_buffer* buffer)
 {
-	// TODO: Back buffer used to be set to NULL here, what's that about?
-
 	nvnc_trace("Passing on buffer: %p", buffer);
 
 	self->n_frames_captured++;
@@ -1140,23 +1160,11 @@ void wayvnc_process_frame(struct wayvnc* self, struct wv_buffer* buffer)
 	struct pixman_region16 damage;
 	pixman_region_init(&damage);
 
-	enum wl_output_transform output_transform, buffer_transform;
-	output_transform = self->selected_output->transform;
-
-	if (buffer->y_inverted) {
-		buffer_transform = wv_output_transform_compose(output_transform,
-				WL_OUTPUT_TRANSFORM_FLIPPED_180);
-
-		wv_region_transform(&damage, &buffer->frame_damage,
-				WL_OUTPUT_TRANSFORM_FLIPPED_180,
-				buffer->width, buffer->height);
-	} else {
-		buffer_transform = output_transform;
+	if (self->screencopy->impl->caps & SCREENCOPY_CAP_TRANSFORM) {
 		pixman_region_copy(&damage, &buffer->frame_damage);
+	} else {
+		apply_output_transform(self, buffer, &damage);
 	}
-
-	nvnc_fb_set_transform(buffer->nvnc_fb,
-			(enum nvnc_transform)buffer_transform);
 
 	pixman_region_intersect_rect(&damage, &damage, 0, 0, buffer->width,
 			buffer->height);

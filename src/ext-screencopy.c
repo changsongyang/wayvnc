@@ -573,6 +573,7 @@ void ext_screencopy_destroy(struct screencopy* ptr)
 }
 
 struct screencopy_impl ext_screencopy_impl = {
+	.caps = SCREENCOPY_CAP_CURSOR | SCREENCOPY_CAP_TRANSFORM,
 	.create = ext_screencopy_create,
 	.create_cursor = ext_screencopy_create_cursor,
 	.destroy = ext_screencopy_destroy,
